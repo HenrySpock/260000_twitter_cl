@@ -1,0 +1,511 @@
+************************************************************************************************************
+SETUP
+************************************************************************************************************
+Manually installed packages because we've been beyond 3.8 for some time:
+(requirements.txt):
+pip install Flask 
+pip install Flask-DebugToolbar 
+pip install SQLAlchemy 
+pip install Flask-WTF 
+pip install email_validator 
+pip install Flask-Bcrypt 
+pip install Flask-SQLAlchemy 
+pip install psycopg2 
+
+******************************
+STEP ONE: UNDERSTAND THE MODEL
+******************************
+
+Added application context to seed.py:
+App not defined (app.py):
+from app import app, db
+
+Acting outside of context error (seed.py):
+# Create an application context
+with app.app_context():
+    db.drop_all()
+    db.create_all()
+
+    with open('generator/users.csv') as users:
+        db.session.bulk_insert_mappings(User, DictReader(users))
+
+    with open('generator/messages.csv') as messages:
+        db.session.bulk_insert_mappings(Message, DictReader(messages))
+
+    with open('generator/follows.csv') as follows:
+        db.session.bulk_insert_mappings(Follows, DictReader(follows))
+
+    db.session.commit()
+
+import pdb (line 2, app.py)
+pdb.set_trace() (line 26 of app.py):
+with app.app_context():
+    connect_db(app)  
+    # pdb.set_trace() 
+
+signup test:
+ 301 | hey@hey.com | HenrySpocker | /static/images/default-pic.png | /static/images/warbler-hero.jpg |     |          | $2b$12$ftbe70F0UqrCNiFt830ONe52oGBj6r8NrWIbzqdbmlm3GfyzKuHeW
+
+********************
+STEP TWO: FIX LOGOUT
+******************** 
+
+implemented logout route:
+@app.route('/logout')
+def logout():
+    """Handle logout of user."""
+    do_logout() 
+
+    return redirect("/login")
+
+updated do_logout for flash message:
+def do_logout():
+    """Logout user."""
+
+    if CURR_USER_KEY in session:
+        del session[CURR_USER_KEY]
+    flash("You have successfully logged out!", "success")
+
+new signup after do_logout deletion error:
+signup test:
+ 302 | hey@hey.com | HenrySpocker | /static/images/default-pic.png | /static/images/warbler-hero.jpg |     |          | $2b$12$ftbe70F0UqrCNiFt830ONe52oGBj6r8NrWIbzqdbmlm3GfyzKuHeW
+
+*****************************
+SETEP THREE: FIX USER PROFILE 
+*****************************
+
+Update UserAddForm:
+class UserAddForm(FlaskForm):
+    """Form for adding users."""
+
+    username = StringField('Username', validators=[DataRequired()])
+    email = StringField('E-mail', validators=[DataRequired(), Email()])
+    password = PasswordField('Password', validators=[Length(min=6)])
+    image_url = StringField('(Optional) Image URL')
+    header_image_url = StringField('(Optional) Header Image URL')
+    bio = TextAreaField('(Optional) Bio')
+    location = StringField('(Optional) Location')
+
+Update signup route to reflect updated UserAddForm:
+@app.route('/signup', methods=["GET", "POST"])
+def signup():
+    """Handle user signup.
+
+    Create new user and add to DB. Redirect to home page.
+
+    If form not valid, present form.
+
+    If the there already is a user with that username: flash message
+    and re-present form.
+    """
+
+    form = UserAddForm()
+
+    if form.validate_on_submit():
+        try:
+            user = User.signup(
+                username=form.username.data,
+                password=form.password.data,
+                email=form.email.data,
+                image_url=form.image_url.data or User.image_url.default.arg,
+                header_image_url=form.header_image_url.data or User.header_image_url.default.arg,
+                bio=form.bio.data or User.bio.default.arg,
+                location=form.location.data or User.location.default.arg
+            )
+            db.session.commit()
+
+        except IntegrityError:
+            flash("Username already taken", 'danger')
+            return render_template('users/signup.html', form=form)
+
+        do_login(user)
+
+        return redirect("/")
+
+    else:
+        return render_template('users/signup.html', form=form)
+
+Updated user in models.py and pass new data:
+#...
+def signup(cls, username, email, password, image_url, header_image_url=None, bio=None, location=None):
+#...
+        user = User(
+            username=username,
+            email=email,
+            password=hashed_pwd,
+            image_url=image_url or User.image_url.default.arg,
+            header_image_url=header_image_url or User.header_image_url.default.arg,
+            bio=bio or User.bio.default.arg,
+            location=location or User.location.default.arg
+        )
+#...
+
+(At this point the database successfully updates with the new data)
+
+Update data passed in users_show:
+    return render_template('users/show.html', user=user, messages=messages, 
+                           bio=user.bio, location=user.location, 
+                           header_image_url=user.header_image_url)
+
+Update detail.html to reflct header_image, bio and location:
+#...
+{#<div id="warbler-hero" class="full-width"></div>#}
+<div id="warbler-hero" class="full-width" style="background-image: url({{ user.header_image_url }});"></div>
+#...
+    {#<p>BIO HERE</p>#}
+    <p>{{ user.bio }}</p>
+    {#<p class="user-location"><span class="fa fa-map-marker"></span>LOCATION HERE</p>#}
+    <p class="user-location"><span class="fa fa-map-marker"></span>{{ user.location }}</p>
+#...
+
+*************************
+STEP FOUR: FIX USER CARDS
+*************************
+
+Update following.html:
+              {# <p class="card-bio">BIO HERE</p> #}
+              <p class="card-bio">{{ followed_user.bio }}</p>
+
+Update followers.html:
+              {# <p class="card-bio">BIO HERE</p> #}
+              <p class="card-bio">{{ follower.bio }}</p>
+
+Update index.html:
+                  {# <p class="card-bio">BIO HERE</p> #}
+                  <p class="card-bio">{{ user.bio }}</p>
+
+***********************
+STEP FIVE: PROFILE EDIT
+***********************
+@app.route('/users/<int:user_id>/edit', methods=["GET", "POST"])
+def user_edit(user_id):
+    """Show edit profile page and process form submission."""
+    user = User.query.get(user_id)
+    if not user:
+        flash(f"No user found with id #{user_id}.", "danger")
+        return redirect("/")
+
+    form = UserEditForm(obj=user)
+
+    if form.validate_on_submit():
+        if User.authenticate(user.username, form.password.data):
+            user.username = form.username.data
+            user.email = form.email.data
+            user.image_url = form.image_url.data or User.image_url.default.arg
+            user.header_image_url = form.header_image_url.data or User.header_image_url.default.arg
+            user.bio = form.bio.data
+            user.location = form.location.data
+
+            db.session.commit()
+
+            flash("Profile updated.", "success")
+            return redirect(f"/users/{user_id}")
+        else:
+            flash("Incorrect password. Please try again.", "danger")
+
+    return render_template('users/edit.html', user=user, form=form)
+
+Add a class in forms.py:
+class UserEditForm(FlaskForm):
+    """Form for editing users."""
+
+    username = StringField('Username', validators=[DataRequired()])
+    email = StringField('E-mail', validators=[DataRequired(), Email()])
+    image_url = StringField('(Optional) Image URL')
+    header_image_url = StringField('(Optional) Header Image URL')
+    bio = TextAreaField('(Optional) Bio')
+    location = StringField('(Optional) Location')
+    password = PasswordField('Password', validators=[Length(min=6)])
+
+Import the UserEditForm in app.py:
+from forms import UserAddForm, LoginForm, MessageForm, UserEditForm
+
+Update the url for the Edit Profile button:
+            {# <a href="/users/profile" class="btn btn-outline-secondary">Edit Profile</a> #} 
+            <a href="{{ url_for('user_edit', user_id=g.user.id) }}" class="btn btn-outline-secondary">Edit Profile</a>
+
+**********************
+STEP SIX: FIX HOMEPAGE
+**********************
+
+Update sql query in @app.route('/'):
+        followed_users = [followed_user.id for followed_user in g.user.following]
+        messages = (Message
+                    .query
+                    .filter(Message.user_id.in_(followed_users + [g.user.id]))
+                    .order_by(Message.timestamp.desc())
+                    .limit(100)
+                    .all())
+
+******************************************************
+STEP SEVEN: RESEARCH AND UNDERSTAND THE LOGIN STRATEGY
+******************************************************
+
+The User class in models.py has two methods that are used for user authentication: 
+signup, called in 
+@app.route('/signup', methods=["GET", "POST"]) 
+and authenticate, called in 
+@app.route('/login', methods=["GET", "POST"]) 
+and also in 
+@app.route('/users/<int:user_id>/edit', methods=["GET", "POST"]) 
+
+class User(db.Model):
+# ...
+    @classmethod
+    # def signup(cls, username, email, password, image_url):
+    def signup(cls, username, email, password, image_url, header_image_url=None, bio=None, location=None):
+        """Sign up user.
+
+        Hashes password and adds user to system.
+        """
+
+        hashed_pwd = bcrypt.generate_password_hash(password).decode('UTF-8')
+
+        # user = User(
+        #     username=username,
+        #     email=email,
+        #     password=hashed_pwd,
+        #     image_url=image_url,
+        # )
+        
+        user = User(
+            username=username,
+            email=email,
+            password=hashed_pwd,
+            image_url=image_url or User.image_url.default.arg,
+            header_image_url=header_image_url or User.header_image_url.default.arg,
+            bio=bio or User.bio.default.arg,
+            location=location or User.location.default.arg
+        ) 
+                
+        db.session.add(user)
+        return user
+
+    @classmethod
+    def authenticate(cls, username, password):
+        """Find user with `username` and `password`.
+
+        This is a class method (call it on the class, not an individual user.)
+        It searches for a user whose password hash matches this password
+        and, if it finds such a user, returns that user object.
+
+        If can't find matching user (or if password is wrong), returns False.
+        """
+
+        user = cls.query.filter_by(username=username).first()
+
+        if user:
+            is_auth = bcrypt.check_password_hash(user.password, password)
+            if is_auth:
+                return user
+
+        return False
+
+The signup method takes in a username, email, password, and optional image URL and adds the new user to the 
+database after hashing their password using Flask-Bcrypt.
+
+The authenticate method takes in a username and password and returns the user object if the provided password 
+matches the hashed password stored in the database. Otherwise, it returns False.
+
+In app.py, user authentication is implemented using Flask's @app.before_request decorator: 
+@app.before_request
+def add_user_to_g():
+    """If we're logged in, add curr user to Flask global."""
+
+    if CURR_USER_KEY in session:
+        g.user = User.query.get(session[CURR_USER_KEY])
+
+    else:
+        g.user = None
+
+When a user makes a request, Flask will first call the add_user_to_g() function before calling the requested 
+view function. The add_user_to_g() function checks if a user is currently logged in by looking for the 
+CURR_USER_KEY in the session object. If CURR_USER_KEY is found, it will use the value stored in the session to 
+query the User object from the database and store it in the Flask global object g. If CURR_USER_KEY is not 
+found, it will set g.user to None.
+
+How is the logged in user tracked?
+The logged in user is tracked using a session variable in Flask, where the current user's ID is stored under the 
+key CURR_USER_KEY.
+
+What is Flask's g object?
+Flask's g object is a global object that is used to store data that needs to be accessed throughout the duration  
+of a request. 
+
+What is the purpose of add_user_to_g?
+The purpose of add_user_to_g is to add the current user to Flask's g object if the user is logged in, so that the 
+user's information can be accessed during a request. If the user is not logged in, g.user is set to None.
+
+What does @app.before_request mean?
+@app.before_request is a decorator in Flask that specifies a function to be executed before each request to the 
+application. In this case, the add_user_to_g function is executed before each request, so that the current user's 
+information can be added to Flask's g object.
+
+********************************************************************************************************
+PART TWO
+********************************************************************************************************
+ADD LIKES
+*********
+
+Update '/':
+        likes = [like.message_id for like in Likes.query.filter_by(user_id=g.user.id)]
+
+Add route for add likes:
+# Likes 
+
+@app.route('/users/add_like/<int:message_id>', methods=['POST'])
+def add_like(message_id):
+    print("add_like route called")
+    # check if user is authenticated
+    print(g.user)
+    if g.user is None:
+        flash("You need to sign in first", "error")
+        form = LoginForm()
+        return render_template('users/login.html', form=form)
+
+    message = Message.query.get(message_id)
+
+    if not message:
+        flash('Message not found.', 'error')
+        return render_template('home.html')
+
+    like = Likes.query.filter_by(user_id=g.user.id, message_id=message_id).first()
+
+    if like:
+        db.session.delete(like)
+        print("Deleted like!")
+    else:
+        like = Likes(user_id=g.user.id, message_id=message_id)
+        db.session.add(like)
+        print("Added like!")
+
+    db.session.commit()
+    print("Committed changes to database!")
+    followed_users = [followed_user.id for followed_user in g.user.following]
+    messages = (Message
+                .query
+                .filter(Message.user_id.in_(followed_users + [g.user.id]))
+                .order_by(Message.timestamp.desc())
+                .limit(100)
+                .all())  
+    likes = [like.message_id for like in Likes.query.filter_by(user_id=g.user.id)]
+    return render_template('home.html', messages=messages, likes=likes)
+
+Add star icon to home.html:
+            {% if g.user.id != msg.user.id %}
+              <form method="POST" action="/users/add_like/{{ msg.id }}" id="messages-form">
+                <button class="btn btn-sm {{'btn-primary' if msg.id in likes else 'btn-secondary'}}">
+                  {% if msg.id in likes %}
+                    <i class="fa fa-star"></i>
+                  {% else %}
+                    <i class="fa fa-thumbs-up"></i>
+                  {% endif %}
+                </button>
+              </form>
+            {% endif %}
+
+Now we update the ul on show.html (I changed Likes to Liked Warbles):
+          <li class="stat">
+            <p class="small">Liked Warbles</p>
+            <h4>
+              <a href="/users/{{ user.id }}/liked_warbles">{{ user.likes | length }}</a>
+            </h4>
+          </li>
+
+Add a route in app.py:
+# Liked Warbles 
+@app.route('/users/<int:user_id>/liked_warbles')
+def users_liked_warbles(user_id):
+    """Show messages liked by user."""
+
+    user = User.query.get_or_404(user_id)
+
+    messages = (Message
+                .query
+                .join(Likes)
+                .filter(Likes.user_id == user_id)
+                .order_by(Message.timestamp.desc())
+                .limit(100)
+                .all())
+
+    return render_template('users/liked_warbles.html', user=user, messages=messages)
+
+And a liked_warbles.html:
+{% extends 'base.html' %}
+
+{% block content %}
+  <h2>Warbles liked by {{ user.username }}</h2>
+
+  <ul class="list-group">
+    {% for message in messages %}
+      <li class="list-group-item">
+        <a href="/users/{{ message.user_id }}">{{ message.user.username }}</a>
+        <span class="text-muted">{{ message.timestamp.strftime('%d %B %Y') }}</span>
+        <p>{{ message.text }}</p>
+      </li>
+    {% endfor %}
+  </ul>
+{% endblock %}
+
+***********************************************************************************************************
+PART 3: TESTING
+
+Updating the user model with overlaps:
+    followers = db.relationship(
+        "User",
+        secondary="follows",
+        primaryjoin=(Follows.user_being_followed_id == id),
+        secondaryjoin=(Follows.user_following_id == id),
+        backref=db.backref("following", overlaps="followers")
+    )
+
+    # following = db.relationship(
+    #     "User",
+    #     secondary="follows",
+    #     primaryjoin=(Follows.user_following_id == id),
+    #     secondaryjoin=(Follows.user_being_followed_id == id)
+    # )
+
+    likes = db.relationship(
+        'Message',
+        secondary="likes"
+    )
+
+Update Message model with overlaps:
+    # user = db.relationship('User')
+    user = db.relationship('User', overlaps="messages") 
+
+Connect test file and app.py to testing database:
+# os.environ['DATABASE_URL'] = "postgresql:///warblerdb_test"
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql:///warblerdb_test'
+
+Updating test file for context:
+        with app.app_context():
+            db.drop_all()
+            db.create_all() 
+            User.query.delete()
+            Message.query.delete()
+            Follows.query.delete()
+
+            self.client = app.test_client()
+
+Import exc to test_user_model.py:
+from sqlalchemy import exc
+
+Changing bio and location default values in models.py:
+    bio = db.Column(
+        db.Text,
+        default="",
+    )
+
+    location = db.Column(
+        db.Text,
+        default="",
+    )
+
+Add a rollback, delete created user:
+    def tearDown(self): 
+        with app.app_context():
+            db.session.rollback()
+            User.query.delete()
+            db.session.commit()

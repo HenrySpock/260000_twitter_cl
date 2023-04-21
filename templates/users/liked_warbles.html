@@ -1,0 +1,15 @@
+{% extends 'base.html' %}
+
+{% block content %}
+  <h2>Warbles liked by {{ user.username }}</h2>
+
+  <ul class="list-group">
+    {% for message in messages %}
+      <li class="list-group-item">
+        <a href="/users/{{ message.user_id }}">{{ message.user.username }}</a>
+        <span class="text-muted">{{ message.timestamp.strftime('%d %B %Y') }}</span>
+        <p>{{ message.text }}</p>
+      </li>
+    {% endfor %}
+  </ul>
+{% endblock %}
